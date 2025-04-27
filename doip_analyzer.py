@@ -64,8 +64,10 @@ def parse_ip_packet(payload):
     try:
         # Extract IP header fields
         version_ihl = payload[0:2]
-        version = int(version_ihl[0], 16) >> 4
-        ihl = int(version_ihl[0], 16) & 0x0F
+        # version = int(version_ihl[0], 16) >> 4
+        version = int(version_ihl[0], 16)
+        # ihl = int(version_ihl[0], 16) & 0x0F
+        ihl = int(version_ihl[1], 16)
         
         # ToS, Total Length, ID, Flags+FragOffset
         tos = payload[2:4]
@@ -118,6 +120,73 @@ def parse_ip_packet(payload):
                 "dest_ip": dest_ip
             },
             "payload": ip_payload
+        }
+    except:
+        return None
+
+def parse_ipv6_packet(payload):
+    if not payload or len(payload) < 80:  # Minimum length for an IPv6 header (40 bytes = 80 hex chars)
+        return None
+    
+    try:
+        # First byte contains version (4 bits) and part of Traffic Class (4 bits)
+        version_tc_high = int(payload[0:2], 16)
+        version = version_tc_high >> 4
+        tc_high = version_tc_high & 0x0F
+        
+        # Second byte contains rest of Traffic Class (4 bits) and part of Flow Label (4 bits)
+        tc_low_flow_high = int(payload[2:4], 16)
+        tc_low = tc_low_flow_high >> 4
+        flow_high = tc_low_flow_high & 0x0F
+        
+        # Traffic Class (combining high and low parts)
+        traffic_class = (tc_high << 4) | tc_low
+        
+        # Flow Label (20 bits total: 4 from second byte + 16 from bytes 3-4)
+        flow_label_low = int(payload[4:8], 16)
+        flow_label = (flow_high << 16) | flow_label_low
+        
+        # Payload Length (16 bits)
+        payload_length = int(payload[8:12], 16)
+        
+        # Next Header (8 bits) - Similar to IPv4's protocol field
+        next_header = int(payload[12:14], 16)
+        
+        # Hop Limit (8 bits) - Similar to IPv4's TTL
+        hop_limit = int(payload[14:16], 16)
+        
+        # Source IPv6 address (128 bits = 32 hex chars)
+        src_ipv6 = ':'.join([payload[i:i+4] for i in range(16, 48, 4)])
+        
+        # Destination IPv6 address (128 bits = 32 hex chars)
+        dest_ipv6 = ':'.join([payload[i:i+4] for i in range(48, 80, 4)])
+        
+        # Protocol name
+        protocol_name = "Unknown"
+        if next_header == 1:
+            protocol_name = "ICMP"
+        elif next_header == 6:
+            protocol_name = "TCP"
+        elif next_header == 17:
+            protocol_name = "UDP"
+        elif next_header == 58:
+            protocol_name = "ICMPv6"
+        
+        # IPv6 payload starts after the header (fixed 40 bytes)
+        ipv6_payload = payload[80:]
+        
+        return {
+            "ipv6": {
+                "version": version,
+                "traffic_class": traffic_class,
+                "flow_label": flow_label,
+                "payload_length": payload_length,
+                "next_header": f"{next_header} ({protocol_name})",
+                "hop_limit": hop_limit,
+                "src_ipv6": src_ipv6,
+                "dest_ipv6": dest_ipv6
+            },
+            "payload": ipv6_payload
         }
     except:
         return None
@@ -178,7 +247,7 @@ def parse_tcp_packet(payload):
 
 def parse_uds_packet(payload):
     if not payload or len(payload) < 2:
-        return {"uds": {"service": "Unknown", "type": "Unknown"}, "payload": payload}
+        return {"uds": {"service_id": "Unknown", "service_type": "Unknown"}, "payload": payload}
     
     try:
         service_id = int(payload[0:2], 16)
@@ -210,7 +279,7 @@ def parse_uds_packet(payload):
         if service_id >= 0x40 and service_id <= 0xBF:
             req_service_id = service_id - 0x40
             if req_service_id in uds_services:
-                service_type = f"Response to {uds_services[req_service_id]}"
+                service_type = f"Response to {uds_services[req_service_id]}(0x{req_service_id:02x})"
             else:
                 service_type = f"Response to Unknown Service (0x{req_service_id:02X})"
         else:
@@ -260,49 +329,160 @@ def parse_uds_packet(payload):
                 "service_type": service_type,
                 "details": service_details
             },
-            "payload": remaining_payload
+            # "payload": remaining_payload
+            "payload": payload
         }
     except:
-        return {"uds": {"service": "Unknown", "type": "Unknown"}, "payload": payload}
+        return {
+            "uds": {
+                "service_id": "Unknown", 
+                "service_type": "Unknown", 
+            }, 
+            "payload": payload
+        }
+
+
 
 # Helper function to detect DoIP protocol (commonly used in automotive diagnostics)
 def detect_doip(tcp_payload):
     # DoIP protocol detection logic can be added here
-    # This is a simplified example and would need to be extended for real DoIP parsing
-    if len(tcp_payload) < 8:
-        return {"doip": {"protocol_version": "Unknown"}, "payload": tcp_payload}
+    if len(tcp_payload) < 16:  # Minimum 8 bytes for header (16 hex chars)
+        return {"doip": {"protocol_version": "Unknown", "inverse_protocol_version": "n.a.", "payload_type": "n.a.", "payload_length": "n.a."}, "payload": tcp_payload}
     
     try:
         protocol_version = int(tcp_payload[0:2], 16)
         inverse_protocol_version = int(tcp_payload[2:4], 16)
         payload_type = int(tcp_payload[4:8], 16)
+        payload_length = int(tcp_payload[8:16], 16)  # 4 bytes for payload length
         
         payload_types = {
-            0x0000: "Generic DoIP Header NACK",
+            0x0000: "Generic DoIP Header Negative ACK",
             0x0001: "Vehicle Identification Request",
-            0x0002: "Vehicle Identification Response",
-            0x0003: "Routing Activation Request",
-            0x0004: "Routing Activation Response",
-            0x0005: "Alive Check Request",
-            0x0006: "Alive Check Response",
-            0x0007: "DoIP Entity Status Request",
-            0x0008: "DoIP Entity Status Response",
-            0x4001: "Diagnostic Message",
-            0x8001: "Diagnostic Message ACK",
-            0x8002: "Diagnostic Message NACK",
-            0x8003: "Diagnostic Message Positive ACK"
+            0x0002: "Vehicle Identification Request with EID",
+            0x0003: "Vehicle Identification Request with VIN",
+            0x0004: "Vehicle Announcement Response Message",
+            0x0005: "Routing Activation Request",
+            0x0006: "Routing Activation Response",
+            0x0007: "Alive Check Request",
+            0x0008: "Alive Check Response",
+            0x4001: "DoIP Entity Status Request",
+            0x4002: "DoIP Entity Status Response",
+            0x4003: "Diagnostic Power Mode Information Request",
+            0x4004: "Diagnostic Power Mode Information Response",
+            0x8001: "Diagnostic Message",
+            0x8002: "Diagnostic Message ACK",
+            0x8003: "Diagnostic Message Negative ACK"
         }
         
-        return {
-            "doip": {
-                "protocol_version": f"0x{protocol_version:02X}",
-                "inverse_protocol_version": f"0x{inverse_protocol_version:02X}",
-                "payload_type": f"0x{payload_type:04X} ({payload_types.get(payload_type, 'Unknown')})"
-            },
-            "payload": tcp_payload[8:]
+        # Create the basic DoIP info dictionary
+        doip_info = {
+            "protocol_version": f"0x{protocol_version:02X}",
+            "inverse_protocol_version": f"0x{inverse_protocol_version:02X}",
+            "payload_type": f"0x{payload_type:04X} ({payload_types.get(payload_type, 'Unknown')})",
+            "payload_length": payload_length
         }
-    except:
-        return {"doip": {"protocol_version": "Unknown"}, "payload": tcp_payload}
+        
+        # Start of actual DoIP payload after the header (8 bytes)
+        doip_payload = tcp_payload[16:]
+        
+        # For Diagnostic Messages (0x8001), extract source and target addresses
+        if payload_type == 0x8001 and len(doip_payload) >= 4:
+            source_address = int(doip_payload[0:4], 16)
+            target_address = int(doip_payload[4:8], 16)
+            doip_info["source_address"] = f"0x{source_address:04X}"
+            doip_info["target_address"] = f"0x{target_address:04X}"
+            # UDS data starts after source and target addresses
+            return {
+                "doip": doip_info,
+                "payload": doip_payload[8:]  # Skip the source and target addresses
+            }
+        
+        # For Diagnostic Message ACK (0x8002), extract addresses and response code
+        elif payload_type == 0x8002 and len(doip_payload) >= 6:
+            source_address = int(doip_payload[0:4], 16)
+            target_address = int(doip_payload[4:8], 16)
+            ack_code = int(doip_payload[8:10], 16)
+            
+            ack_codes = {
+                0x00: "ACK",
+                0x01: "Invalid source address",
+                0x02: "Unknown target address",
+                0x03: "Diagnostic message too large",
+                0x04: "Out of memory",
+                0x05: "Target unreachable",
+                0x06: "Unknown network",
+                0x07: "Transport protocol error"
+            }
+            
+            doip_info["source_address"] = f"0x{source_address:04X}"
+            doip_info["target_address"] = f"0x{target_address:04X}"
+            doip_info["ack_code"] = f"0x{ack_code:02X} ({ack_codes.get(ack_code, 'Unknown')})"
+            
+            return {
+                "doip": doip_info,
+                "payload": doip_payload[10:]  # Skip after the ACK code
+            }
+        
+        # For Diagnostic Message Negative ACK (0x8003), extract addresses and NACK code
+        elif payload_type == 0x8003 and len(doip_payload) >= 6:
+            source_address = int(doip_payload[0:4], 16)
+            target_address = int(doip_payload[4:8], 16)
+            nack_code = int(doip_payload[8:10], 16)
+            
+            nack_codes = {
+                0x00: "Reserved",
+                0x01: "Invalid source address",
+                0x02: "Unknown target address",
+                0x03: "Diagnostic message too large",
+                0x04: "Out of memory",
+                0x05: "Target unreachable",
+                0x06: "Unknown network",
+                0x07: "Transport protocol error",
+                0x10: "Target node not ready",
+                0x11: "Unknown test service"
+            }
+            
+            doip_info["source_address"] = f"0x{source_address:04X}"
+            doip_info["target_address"] = f"0x{target_address:04X}"
+            doip_info["nack_code"] = f"0x{nack_code:02X} ({nack_codes.get(nack_code, 'Unknown')})"
+            
+            return {
+                "doip": doip_info,
+                "payload": doip_payload[10:]  # Skip after the NACK code
+            }
+        
+        # For Routing Activation Response (0x0006)
+        elif payload_type == 0x0006 and len(doip_payload) >= 6:
+            client_logical_address = int(doip_payload[0:4], 16)
+            logical_address_of_doip_entity = int(doip_payload[4:8], 16)
+            routing_activation_response_code = int(doip_payload[8:10], 16)
+            
+            response_codes = {
+                0x00: "Routing activation accepted",
+                0x01: "Routing activation rejected due to unsupported activation type",
+                0x02: "Routing activation rejected due to unsupported reserved value",
+                0x03: "Routing activation rejected due to missing authentication",
+                0x04: "Routing activation rejected due to rejected confirmation",
+                0x05: "Routing activation rejected due to unsupported protocol",
+                0x06: "Routing activation rejected due to different TCP_DATA port",
+                0x07: "Routing activation rejected due to different TCP_DIAG port"
+            }
+            
+            doip_info["client_address"] = f"0x{client_logical_address:04X}"
+            doip_info["doip_entity_address"] = f"0x{logical_address_of_doip_entity:04X}"
+            doip_info["routing_response_code"] = f"0x{routing_activation_response_code:02X} ({response_codes.get(routing_activation_response_code, 'Unknown')})"
+            
+            return {
+                "doip": doip_info,
+                "payload": doip_payload[10:]  # Skip after the response code
+            }
+        
+        return {
+            "doip": doip_info,
+            "payload": doip_payload
+        }
+    except Exception as e:
+        return {"doip": {"protocol_version": "Unknown", "error": str(e)}, "payload": tcp_payload}
 
 # Define function to parse CSV content
 def parse_csv(content):
@@ -423,7 +603,8 @@ if df is not None:
                     Header Length: {ip_info['ihl']} (32-bit words)
                     Type of Service: {ip_info['tos']}
                     Total Length: {ip_info['total_length']} bytes
-                    Identification: {ip_info['identification']}
+                    Identification: 0x{ip_info['identification']}
+                    Flags Fragment Offset: 0x{ip_info['flags_frag_offset']}
                     TTL: {ip_info['ttl']}
                     Protocol: {ip_info['protocol']}
                     Source IP: {ip_info['src_ip']}
@@ -456,16 +637,35 @@ if df is not None:
                                 doip_info = detect_doip(payload)
                                 doip_data = doip_info["doip"]
                                 
-                                uds_text = f"""
-                                Protocol Version: {doip_data['protocol_version']}
-                                Inverse Protocol Version: {doip_data['inverse_protocol_version']}
-                                Payload Type: {doip_data['payload_type']}
-                                """
+                                # Create complete UDS text with all available DoIP information
+                                uds_text = f"Protocol Version: {doip_data['protocol_version']}\n"
+                                uds_text += f"Inverse Protocol Version: {doip_data['inverse_protocol_version']}\n" 
+                                uds_text += f"Payload Type: {doip_data['payload_type']}\n"
+                                uds_text += f"Payload Length: {doip_data['payload_length']} bytes"
+
+                                # Add additional DoIP fields if they exist
+                                if 'source_address' in doip_data:
+                                    uds_text += f"\nSource Address: {doip_data['source_address']}"
+                                if 'target_address' in doip_data:
+                                    uds_text += f"\nTarget Address: {doip_data['target_address']}"
+                                if 'ack_code' in doip_data:
+                                    uds_text += f"\nACK Code: {doip_data['ack_code']}"
+                                if 'nack_code' in doip_data:
+                                    uds_text += f"\nNACK Code: {doip_data['nack_code']}"
+                                if 'client_address' in doip_data:
+                                    uds_text += f"\nClient Address: {doip_data['client_address']}"
+                                if 'doip_entity_address' in doip_data:
+                                    uds_text += f"\nDoIP Entity Address: {doip_data['doip_entity_address']}"
+                                if 'routing_response_code' in doip_data:
+                                    uds_text += f"\nRouting Response: {doip_data['routing_response_code']}"
+
                                 uds_placeholder.text(uds_text)
                                 
                                 # Try to parse UDS within DoIP
                                 uds_data = parse_uds_packet(doip_info["payload"])
+                                
                                 service_text = f"""
+                                message: {uds_data['payload']}
                                 Service ID: {uds_data['uds']['service_id']}
                                 Service Type: {uds_data['uds']['service_type']}
                                 """
@@ -481,6 +681,7 @@ if df is not None:
                                 # Try normal UDS parsing
                                 uds_data = parse_uds_packet(payload)
                                 uds_text = f"""
+                                message: {uds_data['payload']}
                                 Service ID: {uds_data['uds']['service_id']}
                                 Service Type: {uds_data['uds']['service_type']}
                                 """
@@ -505,10 +706,119 @@ if df is not None:
                     uds_placeholder.text("No UDS layer detected.")
                     service_placeholder.text("No service information available.")
             elif eth_info['eth_type'] == '86DD':  # IPv6
-                ip_placeholder.text("IPv6 packet detected. IPv6 parsing not implemented in this version.")
-                tcp_placeholder.text("No TCP layer detected.")
-                uds_placeholder.text("No UDS layer detected.")
-                service_placeholder.text("No service information available.")
+                ipv6_packet = parse_ipv6_packet(ethernet_packet["payload"])
+                
+                if ipv6_packet:
+                    ipv6_info = ipv6_packet["ipv6"]
+                    ip_text = f"""
+                    Version: {ipv6_info['version']}
+                    Traffic Class: {ipv6_info['traffic_class']}
+                    Flow Label: {ipv6_info['flow_label']}
+                    Payload Length: {ipv6_info['payload_length']} bytes
+                    Next Header: {ipv6_info['next_header']}
+                    Hop Limit: {ipv6_info['hop_limit']}
+                    Source IPv6: {ipv6_info['src_ipv6']}
+                    Destination IPv6: {ipv6_info['dest_ipv6']}
+                    """
+                    ip_placeholder.text(ip_text)
+                    
+                    # Parse TCP if present in IPv6 packet
+                    if "TCP" in ipv6_info['next_header']:
+                        tcp_packet = parse_tcp_packet(ipv6_packet["payload"])
+                        
+                        if tcp_packet:
+                            tcp_info = tcp_packet["tcp"]
+                            tcp_text = f"""
+                            Source Port: {tcp_info['src_port']}
+                            Destination Port: {tcp_info['dest_port']}
+                            Sequence Number: {tcp_info['seq_num']}
+                            Acknowledgment Number: {tcp_info['ack_num']}
+                            Data Offset: {tcp_info['data_offset']} (32-bit words)
+                            Flags: {tcp_info['flag_names']}
+                            Window Size: {tcp_info['window']}
+                            """
+                            tcp_placeholder.text(tcp_text)
+                            
+                            # Check for UDS or DoIP protocol
+                            payload = tcp_packet["payload"]
+                            
+                            # Detect if this is DoIP (port 13400 is commonly used for DoIP)
+                            if tcp_info['src_port'] == 13400 or tcp_info['dest_port'] == 13400:
+                                doip_info = detect_doip(payload)
+                                doip_data = doip_info["doip"]
+                                
+                                # Create complete UDS text with all available DoIP information
+                                uds_text = f"Protocol Version: {doip_data['protocol_version']}\n"
+                                uds_text += f"Inverse Protocol Version: {doip_data['inverse_protocol_version']}\n"
+                                uds_text += f"Payload Type: {doip_data['payload_type']}\n"
+                                uds_text += f"Payload Length: {doip_data['payload_length']} bytes"
+
+                                # Add additional DoIP fields if they exist
+                                if 'source_address' in doip_data:
+                                    uds_text += f"\nSource Address: {doip_data['source_address']}"
+                                if 'target_address' in doip_data:
+                                    uds_text += f"\nTarget Address: {doip_data['target_address']}"
+                                if 'ack_code' in doip_data:
+                                    uds_text += f"\nACK Code: {doip_data['ack_code']}"
+                                if 'nack_code' in doip_data:
+                                    uds_text += f"\nNACK Code: {doip_data['nack_code']}"
+                                if 'client_address' in doip_data:
+                                    uds_text += f"\nClient Address: {doip_data['client_address']}"
+                                if 'doip_entity_address' in doip_data:
+                                    uds_text += f"\nDoIP Entity Address: {doip_data['doip_entity_address']}"
+                                if 'routing_response_code' in doip_data:
+                                    uds_text += f"\nRouting Response: {doip_data['routing_response_code']}"
+
+                                uds_placeholder.text(uds_text)
+                                
+                                # Try to parse UDS within DoIP
+                                uds_data = parse_uds_packet(doip_info["payload"])
+                                
+                                service_text = f"""
+                                message: {uds_data['payload']}
+                                Service ID: {uds_data['uds']['service_id']}
+                                Service Type: {uds_data['uds']['service_type']}
+                                """
+                                
+                                # Add details if available
+                                if 'details' in uds_data['uds'] and uds_data['uds']['details']:
+                                    service_text += "\nDetails:"
+                                    for key, value in uds_data['uds']['details'].items():
+                                        service_text += f"\n- {key}: {value}"
+                                
+                                service_placeholder.text(service_text)
+                            else:
+                                # Try normal UDS parsing
+                                uds_data = parse_uds_packet(payload)
+                                uds_text = f"""
+                                message: {uds_data['payload']}
+                                Service ID: {uds_data['uds']['service_id']}
+                                Service Type: {uds_data['uds']['service_type']}
+                                """
+                                uds_placeholder.text(uds_text)
+                                
+                                # Show service details
+                                service_text = "Service Details:"
+                                if 'details' in uds_data['uds'] and uds_data['uds']['details']:
+                                    for key, value in uds_data['uds']['details'].items():
+                                        service_text += f"\n- {key}: {value}"
+                                else:
+                                    service_text += "\nNo detailed information available."
+                                
+                                service_placeholder.text(service_text)
+                        else:
+                            tcp_placeholder.text("Could not parse TCP packet from IPv6 payload.")
+                            uds_placeholder.text("No UDS layer detected.")
+                            service_placeholder.text("No service information available.")
+                    else:
+                        tcp_placeholder.text("No TCP layer detected in this IPv6 packet.")
+                        uds_placeholder.text("No UDS layer detected.")
+                        service_placeholder.text("No service information available.")
+                else:
+                    ip_placeholder.text("Could not parse IPv6 packet.")
+                    tcp_placeholder.text("No TCP layer detected.")
+                    uds_placeholder.text("No UDS layer detected.")
+                    service_placeholder.text("No service information available.")
             else:
                 ip_placeholder.text(f"Unknown EtherType: {eth_info['eth_type']}")
                 tcp_placeholder.text("No TCP layer detected.")
