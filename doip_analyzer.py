@@ -44,14 +44,38 @@ def create_colored_hex_view(data, eth_type=None, ip_protocol=None, tcp_payload_s
         
         # Process TCP or UDP header if present
         if len(data) > ip_end:
-            protocol_color = PROTOCOL_COLORS['tcp']
-            if ip_protocol and "UDP" in ip_protocol:
-                protocol_color = PROTOCOL_COLORS['tcp']  # You can create a UDP-specific color if desired
+            # Update the TCP/DoIP section in create_colored_hex_view
+            if "TCP" in ip_protocol:
+                protocol_color = PROTOCOL_COLORS['tcp']
                 
-            html += f"<span style='background-color: {protocol_color}; padding: 2px;'>"
-            for i in range(ip_end, len(data), 2):
-                html += data[i:i+2] + " "
-            html += "</span>"
+                html += f"<span style='background-color: {protocol_color}; padding: 2px;'>"
+                
+                # If it's DoIP, color differently after TCP header
+                if doip_payload_start and tcp_payload_start:
+                    # TCP header
+                    tcp_header_len = 40  # Approximate, could be calculated more precisely
+                    for i in range(ip_end, min(ip_end + tcp_header_len, len(data)), 2):
+                        html += data[i:i+2] + " "
+                    html += "</span> "
+                    
+                    # DoIP header
+                    doip_header_end = ip_end + tcp_header_len + 16  # 8 bytes for DoIP header
+                    html += f"<span style='background-color: {PROTOCOL_COLORS['doip']}; padding: 2px;'>"
+                    for i in range(ip_end + tcp_header_len, min(doip_header_end, len(data)), 2):
+                        html += data[i:i+2] + " "
+                    html += "</span> "
+                    
+                    # UDS data
+                    if len(data) > doip_header_end:
+                        html += f"<span style='background-color: {PROTOCOL_COLORS['uds']}; padding: 2px;'>"
+                        for i in range(doip_header_end, len(data), 2):
+                            html += data[i:i+2] + " "
+                        html += "</span>"
+                else:
+                    # Just TCP, no special coloring for payload
+                    for i in range(ip_end, len(data), 2):
+                        html += data[i:i+2] + " "
+                    html += "</span>"
     
     elif eth_type == '86DD':  # IPv6
         ipv6_header_len = 80  # 40 bytes * 2 hex chars
@@ -661,8 +685,26 @@ if df is not None:
                         if tcp_packet:
                             tcp_payload_start = True
                             
-                            if tcp_packet["tcp"]["src_port"] == 13400 or tcp_packet["tcp"]["dest_port"] == 13400:
-                                doip_payload_start = True
+                            # Only set doip_payload_start if it's a valid DoIP packet
+                            if (tcp_packet["tcp"]["src_port"] == 13400 or tcp_packet["tcp"]["dest_port"] == 13400):
+                                # Check if payload is a valid DoIP message by validating header
+                                payload = tcp_packet["payload"]
+                                if len(payload) >= 16:  # Minimum 8 bytes for DoIP header
+                                    try:
+                                        protocol_version = int(payload[0:2], 16)
+                                        inverse_protocol_version = int(payload[2:4], 16)
+                                        payload_type = int(payload[4:8], 16)
+                                        payload_length = int(payload[8:16], 16)
+                                        
+                                        # Basic validation - protocol version + inverse should be 0xFF
+                                        if (protocol_version + inverse_protocol_version == 0xFF and 
+                                            payload_type in [0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 
+                                                           0x0005, 0x0006, 0x0007, 0x0008, 0x4001, 
+                                                           0x4002, 0x4003, 0x8001, 0x8002, 0x8003]):
+                                            doip_payload_start = True
+                                    except:
+                                        # Not a valid DoIP header
+                                        doip_payload_start = False
         
         colored_hex = create_colored_hex_view(data, eth_type, ip_protocol, tcp_payload_start, doip_payload_start)
         st.markdown(colored_hex, unsafe_allow_html=True)
