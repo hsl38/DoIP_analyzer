@@ -8,6 +8,82 @@ from io import StringIO
 st.set_page_config(layout="wide", page_title="Automotive Diagnostic Communication Analyzer")
 st.title("Automotive Diagnostic Communication Analyzer")
 
+# Define protocol layer colors (add this near the top of your file)
+PROTOCOL_COLORS = {
+    "ethernet": "#FF9966",  # Orange
+    "ipv4": "#66B2FF",      # Blue
+    "ipv6": "#66CCFF",      # Light Blue
+    "tcp": "#99CC66",       # Green
+    "doip": "#FF66B2",      # Pink
+    "uds": "#CC99FF"        # Purple
+}
+
+# Function to color the raw hex data by protocol layers
+def create_colored_hex_view(data, eth_type=None, ip_protocol=None, tcp_payload_start=None, doip_payload_start=None):
+    # Calculate boundaries
+    ethernet_end = 28  # 14 bytes * 2 hex chars per byte
+    
+    # Create HTML with spans for different colors
+    html = "<pre style='font-family: monospace; white-space: pre-wrap; font-size: 14px;'>"
+    
+    # Process Ethernet header (first 28 hex chars)
+    html += f"<span style='background-color: {PROTOCOL_COLORS['ethernet']}; padding: 2px;'>"
+    for i in range(0, min(ethernet_end, len(data)), 2):
+        html += data[i:i+2] + " "
+    html += "</span> "
+    
+    # Process IP header
+    if eth_type == '0800':  # IPv4
+        ip_header_len = int(data[ethernet_end + 1], 16) * 8  # IHL value * 8 hex chars
+        ip_end = ethernet_end + ip_header_len
+        
+        html += f"<span style='background-color: {PROTOCOL_COLORS['ipv4']}; padding: 2px;'>"
+        for i in range(ethernet_end, min(ip_end, len(data)), 2):
+            html += data[i:i+2] + " "
+        html += "</span> "
+        
+        # Process TCP or UDP header if present
+        if len(data) > ip_end:
+            protocol_color = PROTOCOL_COLORS['tcp']
+            if ip_protocol and "UDP" in ip_protocol:
+                protocol_color = PROTOCOL_COLORS['tcp']  # You can create a UDP-specific color if desired
+                
+            html += f"<span style='background-color: {protocol_color}; padding: 2px;'>"
+            for i in range(ip_end, len(data), 2):
+                html += data[i:i+2] + " "
+            html += "</span>"
+    
+    elif eth_type == '86DD':  # IPv6
+        ipv6_header_len = 80  # 40 bytes * 2 hex chars
+        ipv6_end = ethernet_end + ipv6_header_len
+        
+        html += f"<span style='background-color: {PROTOCOL_COLORS['ipv6']}; padding: 2px;'>"
+        for i in range(ethernet_end, min(ipv6_end, len(data)), 2):
+            html += data[i:i+2] + " "
+        html += "</span> "
+        
+        # Process rest as potential payload based on protocol
+        if len(data) > ipv6_end:
+            protocol_color = PROTOCOL_COLORS['tcp']  # Default
+            
+            # Check if we have protocol information from IPv6 packet processing
+            if ip_protocol and "UDP" in ip_protocol:
+                protocol_color = PROTOCOL_COLORS['tcp']  # Using TCP color for UDP as well
+            
+            html += f"<span style='background-color: {protocol_color}; padding: 2px;'>"
+            for i in range(ipv6_end, len(data), 2):
+                html += data[i:i+2] + " "
+            html += "</span>"
+    
+    else:  # Unknown EtherType
+        html += f"<span style='color: #777777;'>"
+        for i in range(ethernet_end, len(data), 2):
+            html += data[i:i+2] + " "
+        html += "</span>"
+    
+    html += "</pre>"
+    return html
+
 # Function to parse the packet data
 def parse_ethernet_packet(data_str):
     '''
@@ -241,6 +317,32 @@ def parse_tcp_packet(payload):
                 "urgent_ptr": urgent_ptr
             },
             "payload": tcp_payload
+        }
+    except:
+        return None
+
+def parse_udp_packet(payload):
+    if not payload or len(payload) < 16:  # Minimum length for a UDP header (8 bytes = 16 hex chars)
+        return None
+    
+    try:
+        # Extract UDP header fields
+        src_port = int(payload[0:4], 16)
+        dest_port = int(payload[4:8], 16)
+        length = int(payload[8:12], 16)
+        checksum = payload[12:16]
+        
+        # UDP payload starts after the header
+        udp_payload = payload[16:]
+        
+        return {
+            "udp": {
+                "src_port": src_port,
+                "dest_port": dest_port,
+                "length": length,
+                "checksum": checksum
+            },
+            "payload": udp_payload
         }
     except:
         return None
@@ -527,7 +629,6 @@ if df is not None:
     st.dataframe(df, use_container_width=True)
     
     # Allow user to select a row for analysis
-    # selected_index = st.selectbox("Select a packet to analyze:", df.index)
     selected_index = st.number_input(
         "Select a packet to analyze:", 
         min_value = df.index.min(), 
@@ -536,30 +637,66 @@ if df is not None:
         step=1
     )
 
+    # Display Raw Packet Data first (moved up from below)
+    st.subheader("Raw Packet Data")
+    if selected_index is not None:
+        selected_row = df.iloc[selected_index]
+        data = selected_row['data']
+        
+        # Create colored hex view
+        ethernet_packet = parse_ethernet_packet(data)
+        if ethernet_packet:
+            eth_type = ethernet_packet["ethernet"]["eth_type"]
+            ip_protocol = None
+            tcp_payload_start = None
+            doip_payload_start = None
+            
+            if eth_type == '0800':
+                ip_packet = parse_ip_packet(ethernet_packet["payload"])
+                if ip_packet:
+                    ip_protocol = ip_packet["ip"]["protocol"]
+                    
+                    if "TCP" in ip_protocol:
+                        tcp_packet = parse_tcp_packet(ip_packet["payload"])
+                        if tcp_packet:
+                            tcp_payload_start = True
+                            
+                            if tcp_packet["tcp"]["src_port"] == 13400 or tcp_packet["tcp"]["dest_port"] == 13400:
+                                doip_payload_start = True
+        
+        colored_hex = create_colored_hex_view(data, eth_type, ip_protocol, tcp_payload_start, doip_payload_start)
+        st.markdown(colored_hex, unsafe_allow_html=True)
+        
+        # Keep the original for copy-paste purposes
+        with st.expander("Show plain hex data"):
+            formatted_data = ' '.join([data[i:i+2] for i in range(0, len(data), 2)])
+            st.text_area("Raw Hex Data", formatted_data, height=100)
+
     # Analyze and display the parsed data
     st.subheader("Packet Analysis")
     
-    # Create columns for each protocol layer
+    # Update column headers with colored backgrounds
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        st.subheader("Ethernet")
+        st.markdown(f"<h3 style='background-color: {PROTOCOL_COLORS['ethernet']}; padding: 10px;'>Ethernet</h3>", unsafe_allow_html=True)
         eth_placeholder = st.empty()
     
     with col2:
-        st.subheader("IP")
+        # Just use IPv4 color initially - we'll update dynamically if needed
+        st.markdown(f"<h3 style='background-color: {PROTOCOL_COLORS['ipv4']}; padding: 10px;'>IP</h3>", unsafe_allow_html=True)
         ip_placeholder = st.empty()
     
     with col3:
-        st.subheader("TCP")
+        st.markdown(f"<h3 style='background-color: {PROTOCOL_COLORS['tcp']}; padding: 10px;'>TCP</h3>", unsafe_allow_html=True)
         tcp_placeholder = st.empty()
     
     with col4:
-        st.subheader("UDS")
+        st.markdown(f"<h3 style='background-color: {PROTOCOL_COLORS['doip']}; padding: 10px;'>UDS</h3>", unsafe_allow_html=True)
         uds_placeholder = st.empty()
     
     with col5:
-        st.subheader("Service")
+        st.markdown(f"<h3 style='background-color: {PROTOCOL_COLORS['uds']}; padding: 10px;'>Service</h3>", unsafe_allow_html=True)
         service_placeholder = st.empty()
     
     
@@ -573,6 +710,8 @@ if df is not None:
         if ethernet_packet:
             # Display Ethernet information
             eth_info = ethernet_packet["ethernet"]
+            eth_header_hex = data[:28]
+            eth_header_formatted = ' '.join([eth_header_hex[i:i+2] for i in range(0, len(eth_header_hex), 2)])
 
             eth_type = 'unknown'
             if eth_info['eth_type'] == '0800':
@@ -580,16 +719,13 @@ if df is not None:
             elif eth_info['eth_type'] == '86DD':
                 eth_type = 'IPv6'
 
-                # ip_placeholder.text("IPv6 packet detected. IPv6 parsing not implemented in this version.")
-                # tcp_placeholder.text("No TCP layer detected.")
-                # uds_placeholder.text("No UDS layer detected.")
-                # service_placeholder.text("No service information available.")
+            eth_text = f"""Ethernet Header:
+{eth_header_formatted}
 
-            eth_text = f"""
-            Destination MAC: {eth_info['dest_mac']}
-            Source MAC: {eth_info['src_mac']}
-            EtherType: 0x{eth_info['eth_type']} ({eth_type})
-            """
+Destination MAC: {eth_info['dest_mac']}
+Source MAC: {eth_info['src_mac']}
+EtherType: 0x{eth_info['eth_type']} ({eth_type})
+"""
             eth_placeholder.text(eth_text)
             
             # Parse IP if present
@@ -598,18 +734,24 @@ if df is not None:
                 
                 if ip_packet:
                     ip_info = ip_packet["ip"]
-                    ip_text = f"""
-                    Version: {ip_info['version']}
-                    Header Length: {ip_info['ihl']} (32-bit words)
-                    Type of Service: {ip_info['tos']}
-                    Total Length: {ip_info['total_length']} bytes
-                    Identification: 0x{ip_info['identification']}
-                    Flags Fragment Offset: 0x{ip_info['flags_frag_offset']}
-                    TTL: {ip_info['ttl']}
-                    Protocol: {ip_info['protocol']}
-                    Source IP: {ip_info['src_ip']}
-                    Destination IP: {ip_info['dest_ip']}
-                    """
+                    ip_header_len = ip_info['ihl'] * 8  # ihl is in 32-bit words (4 bytes), so * 8 for hex chars
+                    ip_header_hex = ethernet_packet["payload"][:ip_header_len]
+                    ip_header_formatted = ' '.join([ip_header_hex[i:i+2] for i in range(0, len(ip_header_hex), 2)])
+                    
+                    ip_text = f"""IP Header:
+{ip_header_formatted}
+
+Version: {ip_info['version']}
+Header Length: {ip_info['ihl']} (32-bit words)
+Type of Service: {ip_info['tos']}
+Total Length: {ip_info['total_length']} bytes
+Identification: 0x{ip_info['identification']}
+Flags Fragment Offset: 0x{ip_info['flags_frag_offset']}
+TTL: {ip_info['ttl']}
+Protocol: {ip_info['protocol']}
+Source IP: {ip_info['src_ip']}
+Destination IP: {ip_info['dest_ip']}
+"""
                     ip_placeholder.text(ip_text)
                     
                     # Parse TCP if present
@@ -618,17 +760,23 @@ if df is not None:
                         
                         if tcp_packet:
                             tcp_info = tcp_packet["tcp"]
-                            tcp_text = f"""
-                            Source Port: {tcp_info['src_port']}
-                            Destination Port: {tcp_info['dest_port']}
-                            Sequence Number: {tcp_info['seq_num']}
-                            Acknowledgment Number: {tcp_info['ack_num']}
-                            Data Offset: {tcp_info['data_offset']} (32-bit words)
-                            Flags: {tcp_info['flag_names']}
-                            Window Size: {tcp_info['window']}
-                            """
-                            tcp_placeholder.text(tcp_text)
+                            tcp_header_len = tcp_info['data_offset'] * 8  # data_offset is in 32-bit words, so * 8 for hex chars
+                            tcp_header_hex = ip_packet["payload"][:tcp_header_len]
+                            tcp_header_formatted = ' '.join([tcp_header_hex[i:i+2] for i in range(0, len(tcp_header_hex), 2)])
                             
+                            tcp_text = f"""TCP Header:
+{tcp_header_formatted}
+
+Source Port: {tcp_info['src_port']}
+Destination Port: {tcp_info['dest_port']}
+Sequence Number: {tcp_info['seq_num']}
+Acknowledgment Number: {tcp_info['ack_num']}
+Data Offset: {tcp_info['data_offset']} (32-bit words)
+Flags: {tcp_info['flag_names']}
+Window Size: {tcp_info['window']}
+"""
+                            tcp_placeholder.text(tcp_text)
+
                             # Check for UDS or DoIP protocol
                             payload = tcp_packet["payload"]
                             
@@ -637,11 +785,18 @@ if df is not None:
                                 doip_info = detect_doip(payload)
                                 doip_data = doip_info["doip"]
                                 
+                                # Format the DoIP header (first 8 bytes / 16 hex chars)
+                                doip_header_hex = payload[:16]
+                                doip_header_formatted = ' '.join([doip_header_hex[i:i+2] for i in range(0, len(doip_header_hex), 2)])
+                                
                                 # Create complete UDS text with all available DoIP information
-                                uds_text = f"Protocol Version: {doip_data['protocol_version']}\n"
-                                uds_text += f"Inverse Protocol Version: {doip_data['inverse_protocol_version']}\n" 
-                                uds_text += f"Payload Type: {doip_data['payload_type']}\n"
-                                uds_text += f"Payload Length: {doip_data['payload_length']} bytes"
+                                uds_text = f"""DoIP Header:
+{doip_header_formatted}
+
+Protocol Version: {doip_data['protocol_version']}
+Inverse Protocol Version: {doip_data['inverse_protocol_version']}
+Payload Type: {doip_data['payload_type']}
+Payload Length: {doip_data['payload_length']} bytes"""
 
                                 # Add additional DoIP fields if they exist
                                 if 'source_address' in doip_data:
@@ -663,12 +818,16 @@ if df is not None:
                                 
                                 # Try to parse UDS within DoIP
                                 uds_data = parse_uds_packet(doip_info["payload"])
+                                uds_payload_formatted = ' '.join([doip_info["payload"][i:i+2] for i in range(0, min(30, len(doip_info["payload"])), 2)])
+                                if len(doip_info["payload"]) > 30:
+                                    uds_payload_formatted += "..."
                                 
-                                service_text = f"""
-                                message: {uds_data['payload']}
-                                Service ID: {uds_data['uds']['service_id']}
-                                Service Type: {uds_data['uds']['service_type']}
-                                """
+                                service_text = f"""UDS Data:
+{uds_payload_formatted}
+
+Service ID: {uds_data['uds']['service_id']}
+Service Type: {uds_data['uds']['service_type']}
+"""
                                 
                                 # Add details if available
                                 if 'details' in uds_data['uds'] and uds_data['uds']['details']:
@@ -680,11 +839,16 @@ if df is not None:
                             else:
                                 # Try normal UDS parsing
                                 uds_data = parse_uds_packet(payload)
-                                uds_text = f"""
-                                message: {uds_data['payload']}
-                                Service ID: {uds_data['uds']['service_id']}
-                                Service Type: {uds_data['uds']['service_type']}
-                                """
+                                uds_payload_formatted = ' '.join([payload[i:i+2] for i in range(0, min(30, len(payload)), 2)])
+                                if len(payload) > 30:
+                                    uds_payload_formatted += "..."
+                                
+                                uds_text = f"""UDS Data:
+{uds_payload_formatted}
+
+Service ID: {uds_data['uds']['service_id']}
+Service Type: {uds_data['uds']['service_type']}
+"""
                                 uds_placeholder.text(uds_text)
                                 
                                 # Show service details
@@ -696,160 +860,83 @@ if df is not None:
                                     service_text += "\nNo detailed information available."
                                 
                                 service_placeholder.text(service_text)
-                    else:
-                        tcp_placeholder.text("No TCP layer detected in this packet.")
-                        uds_placeholder.text("No UDS layer detected in this packet.")
-                        service_placeholder.text("No service information available.")
-                else:
-                    ip_placeholder.text("Could not parse IP packet.")
-                    tcp_placeholder.text("No TCP layer detected.")
-                    uds_placeholder.text("No UDS layer detected.")
-                    service_placeholder.text("No service information available.")
+
+#                     elif "UDP" in ip_info['protocol']:
+#                         udp_packet = parse_udp_packet(ip_packet["payload"])
+#                         if udp_packet:
+#                             # Display UDP information
+#                             udp_info = udp_packet["udp"]
+#                             tcp_text = f"""UDP Header:
+# Source Port: {udp_info['src_port']}
+# Destination Port: {udp_info['dest_port']}
+# Length: {udp_info['length']} bytes
+# Checksum: 0x{udp_info['checksum']}
+# """
+#                             tcp_placeholder.text(tcp_text)
+
+
             elif eth_info['eth_type'] == '86DD':  # IPv6
                 ipv6_packet = parse_ipv6_packet(ethernet_packet["payload"])
                 
+                # Update the IP column header to IPv6 color
+                col2.markdown(f"<h3 style='background-color: {PROTOCOL_COLORS['ipv6']}; padding: 10px;'>IPv6</h3>", unsafe_allow_html=True)
+                
                 if ipv6_packet:
                     ipv6_info = ipv6_packet["ipv6"]
-                    ip_text = f"""
-                    Version: {ipv6_info['version']}
-                    Traffic Class: {ipv6_info['traffic_class']}
-                    Flow Label: {ipv6_info['flow_label']}
-                    Payload Length: {ipv6_info['payload_length']} bytes
-                    Next Header: {ipv6_info['next_header']}
-                    Hop Limit: {ipv6_info['hop_limit']}
-                    Source IPv6: {ipv6_info['src_ipv6']}
-                    Destination IPv6: {ipv6_info['dest_ipv6']}
-                    """
+                    ipv6_header_hex = ethernet_packet["payload"][:80]  # 40 bytes = 80 hex chars
+                    ipv6_header_formatted = ' '.join([ipv6_header_hex[i:i+2] for i in range(0, len(ipv6_header_hex), 2)])
+                    
+                    ip_text = f"""IPv6 Header:
+{ipv6_header_formatted}
+
+Version: {ipv6_info['version']}
+Traffic Class: 0x{ipv6_info['traffic_class']:02X}
+Flow Label: 0x{ipv6_info['flow_label']:05X}
+Payload Length: {ipv6_info['payload_length']} bytes
+Next Header: {ipv6_info['next_header']}
+Hop Limit: {ipv6_info['hop_limit']}
+Source IPv6: {ipv6_info['src_ipv6']}
+Destination IPv6: {ipv6_info['dest_ipv6']}
+"""
                     ip_placeholder.text(ip_text)
                     
-                    # Parse TCP if present in IPv6 packet
+                    # Continue with TCP parsing if it's TCP...
                     if "TCP" in ipv6_info['next_header']:
+                        # Process TCP in IPv6 (similar to how you do it for IPv4)
                         tcp_packet = parse_tcp_packet(ipv6_packet["payload"])
                         
                         if tcp_packet:
                             tcp_info = tcp_packet["tcp"]
-                            tcp_text = f"""
-                            Source Port: {tcp_info['src_port']}
-                            Destination Port: {tcp_info['dest_port']}
-                            Sequence Number: {tcp_info['seq_num']}
-                            Acknowledgment Number: {tcp_info['ack_num']}
-                            Data Offset: {tcp_info['data_offset']} (32-bit words)
-                            Flags: {tcp_info['flag_names']}
-                            Window Size: {tcp_info['window']}
-                            """
+                            tcp_header_len = tcp_info['data_offset'] * 8  # data_offset is in 32-bit words, so * 8 for hex chars
+                            tcp_header_hex = ipv6_packet["payload"][:tcp_header_len]
+                            tcp_header_formatted = ' '.join([tcp_header_hex[i:i+2] for i in range(0, len(tcp_header_hex), 2)])
+                            
+                            tcp_text = f"""TCP Header:
+{tcp_header_formatted}
+
+Source Port: {tcp_info['src_port']}
+Destination Port: {tcp_info['dest_port']}
+Sequence Number: {tcp_info['seq_num']}
+Acknowledgment Number: {tcp_info['ack_num']}
+Data Offset: {tcp_info['data_offset']} (32-bit words)
+Flags: {tcp_info['flag_names']}
+Window Size: {tcp_info['window']}
+"""
                             tcp_placeholder.text(tcp_text)
+                    
+#                     elif "UDP" in ipv6_info['next_header']:
+#                         udp_packet = parse_udp_packet(ipv6_packet["payload"])
+#                         if udp_packet:
+#                             # Display UDP information
+#                             udp_info = udp_packet["udp"]
+#                             tcp_text = f"""UDP Header:
+# Source Port: {udp_info['src_port']}
+# Destination Port: {udp_info['dest_port']}
+# Length: {udp_info['length']} bytes
+# Checksum: 0x{udp_info['checksum']}
+# """
+#                             tcp_placeholder.text(tcp_text)
                             
-                            # Check for UDS or DoIP protocol
-                            payload = tcp_packet["payload"]
-                            
-                            # Detect if this is DoIP (port 13400 is commonly used for DoIP)
-                            if tcp_info['src_port'] == 13400 or tcp_info['dest_port'] == 13400:
-                                doip_info = detect_doip(payload)
-                                doip_data = doip_info["doip"]
-                                
-                                # Create complete UDS text with all available DoIP information
-                                uds_text = f"Protocol Version: {doip_data['protocol_version']}\n"
-                                uds_text += f"Inverse Protocol Version: {doip_data['inverse_protocol_version']}\n"
-                                uds_text += f"Payload Type: {doip_data['payload_type']}\n"
-                                uds_text += f"Payload Length: {doip_data['payload_length']} bytes"
-
-                                # Add additional DoIP fields if they exist
-                                if 'source_address' in doip_data:
-                                    uds_text += f"\nSource Address: {doip_data['source_address']}"
-                                if 'target_address' in doip_data:
-                                    uds_text += f"\nTarget Address: {doip_data['target_address']}"
-                                if 'ack_code' in doip_data:
-                                    uds_text += f"\nACK Code: {doip_data['ack_code']}"
-                                if 'nack_code' in doip_data:
-                                    uds_text += f"\nNACK Code: {doip_data['nack_code']}"
-                                if 'client_address' in doip_data:
-                                    uds_text += f"\nClient Address: {doip_data['client_address']}"
-                                if 'doip_entity_address' in doip_data:
-                                    uds_text += f"\nDoIP Entity Address: {doip_data['doip_entity_address']}"
-                                if 'routing_response_code' in doip_data:
-                                    uds_text += f"\nRouting Response: {doip_data['routing_response_code']}"
-
-                                uds_placeholder.text(uds_text)
-                                
-                                # Try to parse UDS within DoIP
-                                uds_data = parse_uds_packet(doip_info["payload"])
-                                
-                                service_text = f"""
-                                message: {uds_data['payload']}
-                                Service ID: {uds_data['uds']['service_id']}
-                                Service Type: {uds_data['uds']['service_type']}
-                                """
-                                
-                                # Add details if available
-                                if 'details' in uds_data['uds'] and uds_data['uds']['details']:
-                                    service_text += "\nDetails:"
-                                    for key, value in uds_data['uds']['details'].items():
-                                        service_text += f"\n- {key}: {value}"
-                                
-                                service_placeholder.text(service_text)
-                            else:
-                                # Try normal UDS parsing
-                                uds_data = parse_uds_packet(payload)
-                                uds_text = f"""
-                                message: {uds_data['payload']}
-                                Service ID: {uds_data['uds']['service_id']}
-                                Service Type: {uds_data['uds']['service_type']}
-                                """
-                                uds_placeholder.text(uds_text)
-                                
-                                # Show service details
-                                service_text = "Service Details:"
-                                if 'details' in uds_data['uds'] and uds_data['uds']['details']:
-                                    for key, value in uds_data['uds']['details'].items():
-                                        service_text += f"\n- {key}: {value}"
-                                else:
-                                    service_text += "\nNo detailed information available."
-                                
-                                service_placeholder.text(service_text)
-                        else:
-                            tcp_placeholder.text("Could not parse TCP packet from IPv6 payload.")
-                            uds_placeholder.text("No UDS layer detected.")
-                            service_placeholder.text("No service information available.")
-                    else:
-                        tcp_placeholder.text("No TCP layer detected in this IPv6 packet.")
-                        uds_placeholder.text("No UDS layer detected.")
-                        service_placeholder.text("No service information available.")
-                else:
-                    ip_placeholder.text("Could not parse IPv6 packet.")
-                    tcp_placeholder.text("No TCP layer detected.")
-                    uds_placeholder.text("No UDS layer detected.")
-                    service_placeholder.text("No service information available.")
-            else:
-                ip_placeholder.text(f"Unknown EtherType: {eth_info['eth_type']}")
-                tcp_placeholder.text("No TCP layer detected.")
-                uds_placeholder.text("No UDS layer detected.")
-                service_placeholder.text("No service information available.")
-        else:
-            eth_placeholder.text("Could not parse Ethernet packet.")
-            ip_placeholder.text("No IP layer detected.")
-            tcp_placeholder.text("No TCP layer detected.")
-            uds_placeholder.text("No UDS layer detected.")
-            service_placeholder.text("No service information available.")
-            
-    # Additional information about the application
-    st.sidebar.header("About")
-    st.sidebar.info("""
-    This application analyzes OBD Ethernet logs from automotive diagnostic communications.
-    
-    It parses:
-    - Ethernet frames
-    - IP packets
-    - TCP segments
-    - UDS diagnostic messages
-    
-    Select a row from the table to see detailed protocol information.
-    """)
-    
-    # Add a section to display the raw packet data in a formatted way
-    st.subheader("Raw Packet Data")
-    if selected_index is not None:
-        selected_data = df.iloc[selected_index]['data']
-        formatted_data = ' '.join([selected_data[i:i+2] for i in range(0, len(selected_data), 2)])
-        st.text_area("Raw Hex Data", formatted_data, height=100)
+                            # Then analyze further based on ports (like DHCPv6, DNS, etc.)
 else:
     st.error("Failed to parse the OBD Ethernet log data. Please check the format and try again.")
