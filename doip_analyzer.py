@@ -1788,7 +1788,8 @@ def extract_content_from_document():
 # Get the content
 # csv_content = extract_content_from_document()
 # df = parse_csv(csv_content)
-dir_data = Path('.').absolute()/'asc'
+# dir_data = Path('.').absolute()/'asc'
+dir_data = Path('.')/'asc'
 file_xlsx = dir_data/'obd_ethernet_log.new.xlsx'
 df = pd.read_excel(file_xlsx)    
 df = df.loc[df['tx_rx'] == 'Rx', :].reset_index(drop=True)
