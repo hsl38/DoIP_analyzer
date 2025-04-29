@@ -1791,7 +1791,6 @@ def extract_content_from_document():
 
 file_xlsx = 'obd_ethernet_log.new.xlsx'
 df = pd.read_excel(file_xlsx)    
-st.dataframe(df)
 df = df.loc[df['tx_rx'] == 'Rx', :].reset_index(drop=True)
 
 if df is not None:
